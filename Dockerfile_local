@@ -1,0 +1,23 @@
+# Use a slim, official Python image as the base
+FROM python:3.12
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Install system packages needed by your Python libraries, if any.
+# For now, we assume none are needed beyond what the base image provides.
+
+# Copy all your local code (including requirements.txt) into the container
+COPY . .
+
+# Make bnel-mef3-server.sh executable
+RUN chmod +x /app/bnel-mef3-server.sh
+
+# Install Python dependencies [cite: 16]
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Expose the port your gRPC server listens on [cite: 17]
+EXPOSE 50051
+
+# The command to run your server [cite: 17]
+CMD ["/app/bnel-mef3-server.sh"]

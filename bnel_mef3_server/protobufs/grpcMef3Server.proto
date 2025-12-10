@@ -1,0 +1,99 @@
+syntax = "proto3";
+
+service gRPCMef3Server {
+  rpc OpenFile(OpenFileRequest) returns (FileInfoResponse) {}
+  rpc CloseFile(FileInfoRequest) returns (FileInfoResponse) {}
+  rpc FileInfo(FileInfoRequest) returns (FileInfoResponse) {}
+  rpc SetSignalSegmentSize(SetSignalSegmentRequest) returns (SetSignalSegmentResponse) {}
+  rpc GetSignalSegment(SignalChunkRequest) returns (stream SignalChunk) {}
+  rpc ListOpenFiles(ListOpenFilesRequest) returns (ListOpenFilesResponse) {}
+  rpc SetActiveChannels(SetActiveChannelsRequest) returns (SetActiveChannelsResponse) {}
+  rpc GetActiveChannels(GetActiveChannelsRequest) returns (GetActiveChannelsResponse) {}
+}
+
+message OpenFileRequest {
+  string file_path = 1;
+}
+
+
+message CloseFileRequest {
+  string file_path = 1;
+}
+
+message CloseFileResponse {
+  string file_path = 1;
+  optional string error_message = 99;
+}
+
+
+message FileInfoRequest {
+  string file_path = 1;
+}
+
+message FileInfoResponse {
+  string file_path = 1;
+  bool file_opened = 2;
+  optional int64 number_of_channels = 3;
+  repeated string channel_names = 4;
+  repeated float channel_sampling_rates = 5;
+  optional int64 start_uutc = 6;
+  optional int64 end_uutc = 7;
+  optional double duration_s = 8;
+  optional string error_message = 99;
+}
+
+message SetSignalSegmentRequest {
+  string file_path = 1;
+  int64 seconds = 2;
+}
+message SetSignalSegmentResponse {
+  string file_path = 1;
+  int64 number_of_segments = 2;
+  optional string error_message = 99;
+}
+
+
+message SignalChunkRequest {
+  string file_path = 1;
+  int64 chunk_idx = 2;
+}
+
+message SignalChunk {
+  string file_path = 1;
+  bytes array_bytes = 2;
+  string dtype = 3;
+  repeated int64 shape = 4;
+  int64 start_uutc = 5;
+  int64 end_uutc = 6;
+  double fs = 7;
+  repeated string channel_names = 8;
+  optional string error_message = 99;
+}
+
+message ListOpenFilesRequest {}
+
+message ListOpenFilesResponse {
+  repeated string file_paths = 1;
+  optional string error_message = 99;
+}
+
+message SetActiveChannelsRequest {
+  string file_path = 1;
+  repeated string channel_names = 2;
+}
+
+message SetActiveChannelsResponse {
+  string file_path = 1;
+  repeated string active_channels = 2;
+  optional string error_message = 99;
+}
+
+message GetActiveChannelsRequest {
+  string file_path = 1;
+}
+
+message GetActiveChannelsResponse {
+  string file_path = 1;
+  repeated string active_channels = 2;
+  optional string error_message = 99;
+}

@@ -1,0 +1,55 @@
+# Use a slim, official Python image as the base
+FROM python:3.12
+
+# Set the working directory inside the container
+WORKDIR /app
+
+# Arguments for GitLab CI (kept for future use)
+ARG GITLAB_PROJECT_ID
+ARG PRIVATE_TOKEN
+ARG CI_COMMIT_TAG
+
+# Install necessary tools (Debian/Ubuntu syntax)
+RUN apt-get update && apt-get install -y \
+    curl \
+    jq \
+    unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Print all build arguments for debugging
+RUN echo "GITLAB_PROJECT_ID: $GITLAB_PROJECT_ID" && \
+    echo "PRIVATE_TOKEN: $PRIVATE_TOKEN" && \
+    echo "CI_COMMIT_TAG: $CI_COMMIT_TAG"
+
+# Download the release's source code archive for the current tag directly using CI_COMMIT_TAG
+RUN set -e; \
+    if [ -z "$PRIVATE_TOKEN" ]; then \
+        echo "Error: PRIVATE_TOKEN build-arg must be provided (use --build-arg PRIVATE_TOKEN=<token>)"; \
+        exit 2; \
+    fi; \
+    if [ -z "$CI_COMMIT_TAG" ]; then \
+        echo "Error: CI_COMMIT_TAG build-arg must be provided (use --build-arg CI_COMMIT_TAG=<tag> or build on a tag in CI)"; \
+        exit 2; \
+    fi; \
+    echo "Downloading source archive for tag $CI_COMMIT_TAG from GitLab..."; \
+    curl -H "PRIVATE-TOKEN: $PRIVATE_TOKEN" --location --output release.zip "https://gitlab.com/api/v4/projects/${GITLAB_PROJECT_ID}/repository/archive.zip?sha=$CI_COMMIT_TAG"
+
+# Unzip the release and clean up
+RUN unzip release.zip && rm release.zip
+
+# Move the contents of the unzipped folder to /app (robust for any single folder)
+RUN set -e; d=$(find . -maxdepth 1 -type d -name '*-*' | head -n1); \
+    mv "$d"/* "$d"/.[!.]* . 2>/dev/null || true; \
+    rmdir "$d"
+
+# Make bnel-mef3-server.sh executable
+RUN chmod +x /app/bnel-mef3-server.sh
+
+# Install Python dependencies from the release
+RUN pip install --no-cache-dir -r requirements.txt && rm -rf ~/.cache/pip
+
+# Expose the port your gRPC server listens on
+EXPOSE 50051
+
+# The command to run your server (unbuffered output)
+CMD ["/app/bnel-mef3-server.sh"]
