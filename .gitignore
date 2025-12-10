@@ -34,3 +34,7 @@ dist/
 
 # Benchmarks
 .benchmarks/
+
+# Sphinx documentation
+docs/_build/
+docs/_autosummary/
