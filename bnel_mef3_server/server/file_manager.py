@@ -71,34 +71,39 @@ class FileManager:
             file_path (str): Path to the MEF file.
             chunk_idx (int): Index of the chunk to load and cache.
         """
+        # Minimize lock duration - only check and mark as in-progress
         with self._lock:
             # Check if file is still open and chunk isn't already cached
-            if file_path not in self._files or chunk_idx in self._files[file_path]['cache']:
+            if file_path not in self._files:
                 return
-
+            
             state = self._files[file_path]
-            rdr = state['reader']
-            chunks = state['chunks']
             cache = state['cache']
-            # --- In-progress event tracking ---
-            in_progress = self._in_progress.setdefault(file_path, {})
+            
+            # Quick check: already cached or invalid index
             if chunk_idx in cache:
                 return
+            
+            chunks = state['chunks']
+            if not (chunks and 0 <= chunk_idx < len(chunks)):
+                return
+            
+            # --- In-progress event tracking ---
+            in_progress = self._in_progress.setdefault(file_path, {})
             if chunk_idx in in_progress:
                 # Already being prefetched
                 return
+            
             # Mark as in progress
             event = threading.Event()
             in_progress[chunk_idx] = event
-
-            if not 0 <= chunk_idx < len(chunks):
-                # Clean up event if invalid
-                del in_progress[chunk_idx]
-                return
+            
+            # Get references we need (outside lock, these are safe to use)
+            rdr = state['reader']
+            chunk_info = chunks[chunk_idx]
 
         # --- Data reading happens outside the main lock ---
         try:
-            chunk_info = chunks[chunk_idx]
             channels = rdr.channels
             data = rdr.get_data(channels, chunk_info['start'], chunk_info['end'])
             data = np.array(data)
@@ -108,12 +113,12 @@ class FileManager:
             logger.debug(f"Cache PREFETCHED: chunk {chunk_idx} for {file_path}")
         except Exception as e:
             logger.error(f"Error prefetching chunk {chunk_idx} for {file_path}: {e}")
-            pass
         finally:
             # Signal completion and cleanup
             with self._lock:
                 event.set()
-                in_progress.pop(chunk_idx, None)
+                if file_path in self._in_progress:
+                    self._in_progress[file_path].pop(chunk_idx, None)
 
     def open_file(self, file_path):
         """Opens a MEF file and initializes its state.
@@ -156,10 +161,12 @@ class FileManager:
                     error_message=str(e)
                 )
 
-            # Prefetch chunk 0 if chunks are already set (e.g., re-opening)
+            # Prefetch initial chunks if chunks are already set (e.g., re-opening)
             state = self._files[file_path]
             if state['chunks']:
-                self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, 0)
+                num_to_prefetch = min(self.n_prefetch + 1, len(state['chunks']))
+                for idx in range(num_to_prefetch):
+                    self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, idx)
 
             return self._get_file_info_unsafe(file_path)
 
@@ -200,6 +207,18 @@ class FileManager:
                     error_message=f"Invalid chunk request: {chunk_idx} for {file_path}"
                 )
                 return
+            # --- PREFETCHING: Submit background tasks to load neighbors FIRST (before waiting) ---
+            # This ensures prefetching happens eagerly, even before we need the current chunk
+            # Batch check all neighbors in one lock acquisition to reduce contention
+            with self._lock:
+                for i in range(1, self.n_prefetch + 1):
+                    neighbor_before = chunk_idx - i
+                    neighbor_after = chunk_idx + i
+                    if neighbor_before >= 0 and neighbor_before not in cache and neighbor_before not in in_progress:
+                        self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, neighbor_before)
+                    if neighbor_after < len(chunks) and neighbor_after not in cache and neighbor_after not in in_progress:
+                        self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, neighbor_after)
+            
             data = cache.get(chunk_idx)
             if data is not None:
                 # --- CACHE HIT ---
@@ -229,7 +248,6 @@ class FileManager:
                             data = data[channel_indices, :]
                     else:
                         logger.warning(f"Prefetch failed for chunk {chunk_idx} for {file_path}, loading from disk.")
-                        pass
                 if data is None:
                     logger.info(f"Cache MISS: chunk {chunk_idx} for {file_path}. Loading from disk.")
                     # --- CACHE MISS (not in progress or prefetch failed) ---
@@ -245,15 +263,6 @@ class FileManager:
                             error_message=str(e)
                         )
                         return
-                # --- PREFETCHING: Submit background tasks to load neighbors ---
-                for i in range(1, self.n_prefetch + 1):
-                    neighbor_before = chunk_idx - i
-                    neighbor_after = chunk_idx + i
-                    with self._lock:
-                        if neighbor_before >= 0 and neighbor_before not in cache and neighbor_before not in in_progress:
-                            self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, neighbor_before)
-                        if neighbor_after < len(chunks) and neighbor_after not in cache and neighbor_after not in in_progress:
-                            self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, neighbor_after)
 
             # --- Dynamic chunking for ~2.5MB ---
             shape = list(data.shape)
@@ -428,7 +437,10 @@ class FileManager:
                 state['chunks'] = segments
                 if segments:
                     logger.info(f"Set segment size to {seconds}s for {file_path}, total segments: {len(segments)}")
-                    self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, 0)
+                    # Eagerly prefetch the first n_prefetch chunks
+                    num_to_prefetch = min(self.n_prefetch + 1, len(segments))
+                    for idx in range(num_to_prefetch):
+                        self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, idx)
 
                 return gRPCMef3Server_pb2.SetSignalSegmentResponse(
                     file_path=file_path,
