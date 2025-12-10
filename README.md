@@ -128,22 +128,31 @@ pytest
 ### Linting
 You can use any linter compatible with Google-style docstrings (e.g., `pylint`, `flake8`).
 
-### Generating Documentation
-This project uses Google-style docstrings for Sphinx compatibility.
-To generate HTML docs:
-1. Install Sphinx and the Napoleon extension:
-   ```sh
-   pip install sphinx sphinxcontrib-napoleon
-   ```
-2. Run Sphinx quickstart and configure for Napoleon (Google docstrings).
-3. Add `bnel_mef3_server` to autodoc modules.
-4. Build docs:
-   ```sh
-   sphinx-build -b html docs/ docs/_build/html
-   ```
+### Building Documentation
+This project uses Sphinx with Google-style docstrings for API documentation.
+
+To build the documentation locally:
+```sh
+# Install documentation dependencies
+pip install -e ".[docs]"
+
+# Build HTML documentation
+cd docs
+make html
+
+# Or use sphinx-build directly
+sphinx-build -b html docs/ docs/_build/html
+```
+
+The built documentation will be available at `docs/_build/html/index.html`.
+
+#### Online Documentation
+Documentation is automatically built and deployed to GitHub Pages on every push to the `main` branch. The documentation is available at: https://bnelair.github.io/brainmaze_data_server/
+
+The deployment uses GitHub Actions (see `.github/workflows/docs.yml`) and publishes to the `gh-pages` branch.
 
 ## CI/CD
-Docker images are built and pushed automatically on GitLab tag events (see `.gitlab-ci.yml`).
+Documentation is automatically built and deployed to GitHub Pages on every push to the `main` branch via GitHub Actions (see `.github/workflows/docs.yml`).
 
 ## License
 Specify your license here.
