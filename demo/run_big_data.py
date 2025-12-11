@@ -1,7 +1,7 @@
 """
 Demo: Testing the Mef3Client with real-life big data.
 
-This script demonstrates opening a large MEF3 file, setting chunk size, 
+This script demonstrates opening a large MEF3 file, setting segment size, 
 retrieving signal data, and testing various edge cases that may occur with 
 real-life data.
 

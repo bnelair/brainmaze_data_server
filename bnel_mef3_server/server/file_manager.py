@@ -134,7 +134,9 @@ class FileManager:
             cache.put(chunk_idx, data)
             logger.debug(f"Cache PREFETCHED: chunk {chunk_idx} for {file_path}")
         except Exception as e:
-            logger.error(f"Error prefetching chunk {chunk_idx} for {file_path}: {e}", exc_info=True)
+            # Use exc_info only for DEBUG level to avoid excessive logging
+            logger.error(f"Error prefetching chunk {chunk_idx} for {file_path}: {e}")
+            logger.debug(f"Prefetch error details:", exc_info=True)
         finally:
             # Signal completion and cleanup
             with self._lock:
@@ -488,9 +490,15 @@ class FileManager:
                 if 'chunks' in state and state['chunks']:
                     logger.debug(f"Clearing cache for {file_path} before resetting segment size")
                     state['cache'].clear()
-                    # Cancel any in-progress prefetches for this file
+                    # Clear in-progress tracking (background threads will complete naturally)
+                    # The events will still be set in the finally blocks of those threads
                     if file_path in self._in_progress:
+                        # Wait briefly for any in-progress operations to notice the cleared cache
+                        in_progress_events = list(self._in_progress[file_path].values())
                         self._in_progress[file_path].clear()
+                        # Give existing operations a moment to complete (non-blocking)
+                        for event in in_progress_events[:5]:  # Wait for up to 5 recent operations
+                            event.wait(timeout=0.1)
                 
                 segment_starts = np.arange(start_uutc, end_uutc, seconds * 1e6)
                 segments = []
