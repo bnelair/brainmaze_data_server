@@ -40,6 +40,15 @@ def launch_server_process():
     time.sleep(0.5)
 
 
+# MEF3 test data configuration constants
+MEF3_TEST_CHANNELS = 64
+MEF3_TEST_FS = 256
+MEF3_TEST_DURATION_S = 60 * 60  # 1 hour for tests
+MEF3_TEST_PRECISION = 2
+# Timestamp 100 days in the past (to simulate historical data)
+MEF3_TEST_START_OFFSET_DAYS = 100
+
+
 @pytest.fixture(scope="function")
 def real_life_test_file(tmp_path):
     """
@@ -48,25 +57,23 @@ def real_life_test_file(tmp_path):
     - 256 Hz sampling rate
     - 1 hour of data
     - precision=2 as specified
+    - Timestamp set 100 days in past to simulate historical data
     """
     pth = str(tmp_path)
     pth_mef = os.path.join(pth, "big_data_demo.mefd")
-    
-    n_channels = 64
-    fs = 256
-    data_len_s = 60 * 60  # 1 hour
     
     wrt = MefWriter(pth_mef, overwrite=True)
     wrt.mef_block_len = 10000
     wrt.max_nans_written = 0
     
     # Use consistent timestamp in microseconds (MEF3 standard)
-    s = (datetime.now().timestamp() - 3600*24*100) * 1e6
+    # Set 100 days in the past to simulate historical data
+    s = (datetime.now().timestamp() - 3600*24*MEF3_TEST_START_OFFSET_DAYS) * 1e6
     
-    for idx in tqdm(range(n_channels), desc="Creating test MEF3 file"):
+    for idx in tqdm(range(MEF3_TEST_CHANNELS), desc="Creating test MEF3 file"):
         chname = f"chan_{idx+1:03d}"
-        x = np.random.randn(data_len_s * fs)
-        wrt.write_data(x, chname, s, fs, precision=2)
+        x = np.random.randn(MEF3_TEST_DURATION_S * MEF3_TEST_FS)
+        wrt.write_data(x, chname, s, MEF3_TEST_FS, precision=MEF3_TEST_PRECISION)
     
     return pth_mef
 
@@ -78,9 +85,9 @@ def test_real_life_data(real_life_test_file, launch_server_process):
     Tests server flexibility with window size and active channel changes.
     """
     pth_mef = real_life_test_file
-    fs = 256
-    n_channels = 64
-    data_len_s = 60 * 60
+    fs = MEF3_TEST_FS
+    n_channels = MEF3_TEST_CHANNELS
+    data_len_s = MEF3_TEST_DURATION_S
 
     cl = Mef3Client("localhost:50051")
     cl.open_file(pth_mef)
@@ -141,7 +148,7 @@ def test_dynamic_parameter_changes(real_life_test_file, launch_server_process):
     This simulates real-world usage where users frequently adjust window sizes and channels.
     """
     pth_mef = real_life_test_file
-    fs = 256
+    fs = MEF3_TEST_FS
     
     cl = Mef3Client("localhost:50051")
     cl.open_file(pth_mef)

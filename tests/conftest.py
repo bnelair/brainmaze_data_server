@@ -39,6 +39,15 @@ def mef3_file():
         yield file_path
 
 
+# MEF3 benchmark data configuration constants
+MEF3_BENCHMARK_CHANNELS = 64
+MEF3_BENCHMARK_FS = 256
+MEF3_BENCHMARK_DURATION_S = 2 * 60 * 60  # 2 hours for benchmarks
+MEF3_BENCHMARK_PRECISION = 2
+# Timestamp 100 days in the past (to simulate historical data)
+MEF3_BENCHMARK_START_OFFSET_DAYS = 100
+
+
 @pytest.fixture(scope="session")
 def real_life_mef3_file():
     """
@@ -47,25 +56,23 @@ def real_life_mef3_file():
     - 256 Hz sampling rate
     - 2 hours of data (for benchmarks)
     - precision=2 as specified
+    - Timestamp set 100 days in past to simulate historical data
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         file_path = os.path.join(tmpdir, "big_data_demo.mefd")
-        
-        n_channels = 64
-        fs = 256
-        data_len_s = 2 * 60 * 60  # 2 hours for benchmarks
         
         wrt = MefWriter(file_path, overwrite=True)
         wrt.mef_block_len = 10000
         wrt.max_nans_written = 0
         
         # Use consistent timestamp in microseconds (MEF3 standard)
-        s = (datetime.datetime.now().timestamp() - 3600*24*100) * 1e6
+        # Set 100 days in the past to simulate historical data
+        s = (datetime.datetime.now().timestamp() - 3600*24*MEF3_BENCHMARK_START_OFFSET_DAYS) * 1e6
         
-        for idx in range(n_channels):
+        for idx in range(MEF3_BENCHMARK_CHANNELS):
             chname = f"chan_{idx+1:03d}"
-            x = np.random.randn(data_len_s * fs)
-            wrt.write_data(x, chname, s, fs, precision=2)
+            x = np.random.randn(MEF3_BENCHMARK_DURATION_S * MEF3_BENCHMARK_FS)
+            wrt.write_data(x, chname, s, MEF3_BENCHMARK_FS, precision=MEF3_BENCHMARK_PRECISION)
         
         yield file_path
 
