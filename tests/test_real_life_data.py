@@ -49,8 +49,8 @@ MEF3_TEST_PRECISION = 2
 MEF3_TEST_START_OFFSET_DAYS = 100
 
 
-@pytest.fixture(scope="function")
-def real_life_test_file(tmp_path):
+@pytest.fixture(scope="module")
+def real_life_test_file(tmp_path_factory):
     """
     Creates a realistic MEF3 file for real-life testing.
     - 64 channels
@@ -58,8 +58,13 @@ def real_life_test_file(tmp_path):
     - 1 hour of data
     - precision=2 as specified
     - Timestamp set 100 days in past to simulate historical data
+    
+    Note: Uses module scope so the file is created once for all tests in this module,
+    significantly improving test performance.
     """
-    pth = str(tmp_path)
+    # Use tmp_path_factory for module-scoped fixtures
+    tmpdir = tmp_path_factory.mktemp("real_life_data")
+    pth = str(tmpdir)
     pth_mef = os.path.join(pth, "big_data_demo.mefd")
     
     wrt = MefWriter(pth_mef, overwrite=True)
@@ -70,10 +75,12 @@ def real_life_test_file(tmp_path):
     # Set 100 days in the past to simulate historical data
     s = (datetime.now().timestamp() - 3600*24*MEF3_TEST_START_OFFSET_DAYS) * 1e6
     
+    print("\n[Creating test MEF3 file - this happens once per module]")
     for idx in tqdm(range(MEF3_TEST_CHANNELS), desc="Creating test MEF3 file"):
         chname = f"chan_{idx+1:03d}"
         x = np.random.randn(MEF3_TEST_DURATION_S * MEF3_TEST_FS)
         wrt.write_data(x, chname, s, MEF3_TEST_FS, precision=MEF3_TEST_PRECISION)
+    print("[Test MEF3 file created successfully]")
     
     return pth_mef
 
