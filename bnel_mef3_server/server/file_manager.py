@@ -108,9 +108,18 @@ class FileManager:
             data = rdr.get_data(channels, chunk_info['start'], chunk_info['end'])
             data = np.array(data)
 
-            # --- Put loaded data into the cache ---
-            cache.put(chunk_idx, data)
-            logger.debug(f"Cache PREFETCHED: chunk {chunk_idx} for {file_path}")
+            # --- Put loaded data into the cache only if chunk info is still valid ---
+            # This prevents stale data from being cached if segment size changed during prefetch
+            with self._lock:
+                if file_path in self._files:
+                    current_chunks = self._files[file_path]['chunks']
+                    # Verify the chunk_info we used is still valid
+                    if (current_chunks and 0 <= chunk_idx < len(current_chunks) and 
+                        current_chunks[chunk_idx] == chunk_info):
+                        cache.put(chunk_idx, data)
+                        logger.debug(f"Cache PREFETCHED: chunk {chunk_idx} for {file_path}")
+                    else:
+                        logger.debug(f"Skipping cache put for chunk {chunk_idx} - segment config changed during prefetch")
         except Exception as e:
             logger.error(f"Error prefetching chunk {chunk_idx} for {file_path}: {e}")
         finally:
