@@ -39,27 +39,34 @@ def mef3_file():
         yield file_path
 
 
-# MEF3 benchmark data configuration constants
-MEF3_BENCHMARK_CHANNELS = 64
-MEF3_BENCHMARK_FS = 256
-MEF3_BENCHMARK_DURATION_S = 2 * 60 * 60  # 2 hours for benchmarks
-MEF3_BENCHMARK_PRECISION = 2
+# MEF3 test data configuration constants
+MEF3_TEST_CHANNELS = 64
+MEF3_TEST_FS = 256
+MEF3_TEST_PRECISION = 2
 # Timestamp 100 days in the past (to simulate historical data)
-MEF3_BENCHMARK_START_OFFSET_DAYS = 100
+MEF3_TEST_START_OFFSET_DAYS = 100
+
+# For functional tests (1 hour)
+MEF3_FUNCTIONAL_TEST_DURATION_S = 60 * 60  
+
+# For benchmarks (2 hours) 
+MEF3_BENCHMARK_DURATION_S = 2 * 60 * 60
 
 
 @pytest.fixture(scope="session")
-def real_life_mef3_file():
+def benchmark_mef3_file():
     """
-    Creates a realistic MEF3 file for benchmarks and testing.
+    Creates a realistic MEF3 file for benchmarks.
     - 64 channels
     - 256 Hz sampling rate
-    - 2 hours of data (for benchmarks)
+    - 2 hours of data
     - precision=2 as specified
     - Timestamp set 100 days in past to simulate historical data
+    
+    Session-scoped for optimal performance across all benchmarks.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = os.path.join(tmpdir, "big_data_demo.mefd")
+        file_path = os.path.join(tmpdir, "benchmark_data.mefd")
         
         wrt = MefWriter(file_path, overwrite=True)
         wrt.mef_block_len = 10000
@@ -67,14 +74,75 @@ def real_life_mef3_file():
         
         # Use consistent timestamp in microseconds (MEF3 standard)
         # Set 100 days in the past to simulate historical data
-        s = (datetime.datetime.now().timestamp() - 3600*24*MEF3_BENCHMARK_START_OFFSET_DAYS) * 1e6
+        s = (datetime.datetime.now().timestamp() - 3600*24*MEF3_TEST_START_OFFSET_DAYS) * 1e6
         
-        for idx in range(MEF3_BENCHMARK_CHANNELS):
+        print("\n[Creating benchmark MEF3 file - 2 hours of data]")
+        for idx in range(MEF3_TEST_CHANNELS):
             chname = f"chan_{idx+1:03d}"
-            x = np.random.randn(MEF3_BENCHMARK_DURATION_S * MEF3_BENCHMARK_FS)
-            wrt.write_data(x, chname, s, MEF3_BENCHMARK_FS, precision=MEF3_BENCHMARK_PRECISION)
+            x = np.random.randn(MEF3_BENCHMARK_DURATION_S * MEF3_TEST_FS)
+            wrt.write_data(x, chname, s, MEF3_TEST_FS, precision=MEF3_TEST_PRECISION)
+        print("[Benchmark MEF3 file created successfully]")
         
         yield file_path
+
+
+@pytest.fixture(scope="module")
+def functional_test_mef3_file(tmp_path_factory):
+    """
+    Creates a realistic MEF3 file for functional tests.
+    - 64 channels
+    - 256 Hz sampling rate
+    - 1 hour of data
+    - precision=2 as specified
+    - Timestamp set 100 days in past to simulate historical data
+    
+    Module-scoped so the file is created once for all tests in a module.
+    """
+    tmpdir = tmp_path_factory.mktemp("functional_test_data")
+    pth = str(tmpdir)
+    pth_mef = os.path.join(pth, "functional_test_data.mefd")
+    
+    wrt = MefWriter(pth_mef, overwrite=True)
+    wrt.mef_block_len = 10000
+    wrt.max_nans_written = 0
+    
+    # Use consistent timestamp in microseconds (MEF3 standard)
+    # Set 100 days in the past to simulate historical data
+    s = (datetime.datetime.now().timestamp() - 3600*24*MEF3_TEST_START_OFFSET_DAYS) * 1e6
+    
+    print("\n[Creating functional test MEF3 file - 1 hour of data]")
+    for idx in range(MEF3_TEST_CHANNELS):
+        chname = f"chan_{idx+1:03d}"
+        x = np.random.randn(MEF3_FUNCTIONAL_TEST_DURATION_S * MEF3_TEST_FS)
+        wrt.write_data(x, chname, s, MEF3_TEST_FS, precision=MEF3_TEST_PRECISION)
+    print("[Functional test MEF3 file created successfully]")
+    
+    return pth_mef
+
+
+@pytest.fixture(scope="function")
+def launch_server_process():
+    """
+    Launches the gRPC server main() in a separate process.
+    Used for functional tests that need server on port 50051.
+    """
+    import multiprocessing
+    from bnel_mef3_server.server.__main__ import main as server_entrypoint
+    
+    # Initialize process targeting the main entrypoint
+    proc = multiprocessing.Process(target=server_entrypoint, daemon=True)
+    proc.start()
+
+    # Wait for the server to bind the port
+    time.sleep(2)
+
+    yield
+
+    # Terminate the process (triggers handle_sigterm in main)
+    proc.terminate()
+    proc.join(timeout=5)
+    # Give a bit more time for the port to be released
+    time.sleep(0.5)
 
 
 # --- Server and Client Fixtures ---------------------------------------

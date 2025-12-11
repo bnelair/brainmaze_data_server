@@ -1,144 +1,64 @@
 """
-Test different data access patterns to identify potential performance issues.
-Uses real_life_mef3_file fixture with 2 hours of data for realistic benchmarks.
+Benchmark tests for MEF3 server performance.
+All benchmarks use the same dataset (2 hours, 64 channels, 256 Hz, precision=2)
+and the same number of operations (20 chunks) for fair comparison.
 """
 import pytest
 import numpy as np
 import threading
-from concurrent import futures as concurrent_futures
 from mef_tools import MefReader
-from bnel_mef3_server.server.file_manager import FileManager
-from tests.conftest import real_life_mef3_file
+from bnel_mef3_server.client import Mef3Client
 
 
-def forward_sequential_access(file_manager, file_path, num_chunks=10):
-    """Access chunks in forward sequential order (0, 1, 2, ...)"""
+# Standard benchmark parameters
+BENCHMARK_NUM_CHUNKS = 20  # All benchmarks use 20 chunks for fair comparison
+BENCHMARK_SEGMENT_SIZE_S = 60  # 60 second segments
+
+
+# --- Helper functions for access patterns ---
+
+def grpc_sequential_forward(client, file_path, num_chunks):
+    """Access chunks in forward sequential order via gRPC."""
     for i in range(num_chunks):
-        _ = list(file_manager.get_signal_segment(file_path, i))
+        _ = client.get_signal_segment(file_path, i)
 
 
-def backward_sequential_access(file_manager, file_path, num_chunks=10):
-    """Access chunks in backward sequential order (9, 8, 7, ...)"""
+def grpc_sequential_backward(client, file_path, num_chunks):
+    """Access chunks in backward sequential order via gRPC."""
     for i in range(num_chunks - 1, -1, -1):
-        _ = list(file_manager.get_signal_segment(file_path, i))
+        _ = client.get_signal_segment(file_path, i)
 
 
-def random_access(file_manager, file_path, num_chunks=10):
-    """Access chunks in random order"""
-    # Use a fixed seed for reproducibility, but vary the pattern
+def grpc_random_access(client, file_path, num_chunks):
+    """Access chunks in random order via gRPC."""
     import random
     indices = list(range(num_chunks))
     random.Random(42).shuffle(indices)
     for i in indices:
-        _ = list(file_manager.get_signal_segment(file_path, i))
+        _ = client.get_signal_segment(file_path, i)
 
 
-def back_and_forth_access(file_manager, file_path):
-    """Access chunks in back-and-forth pattern (viewer-like)"""
-    # Simulate a viewer paging forward then backward
-    # Forward: 0, 1, 2, 3, 4
-    for i in range(5):
-        _ = list(file_manager.get_signal_segment(file_path, i))
-    # Backward: 4, 3, 2, 1, 0
-    for i in range(4, -1, -1):
-        _ = list(file_manager.get_signal_segment(file_path, i))
-
-
-@pytest.mark.benchmark
-def test_forward_sequential_with_prefetch(benchmark, real_life_mef3_file):
-    """Benchmark forward sequential access WITH prefetching on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(forward_sequential_access, fm, real_life_mef3_file, 20)
-    fm.shutdown()
-
-
-@pytest.mark.benchmark
-def test_forward_sequential_no_prefetch(benchmark, real_life_mef3_file):
-    """Benchmark forward sequential access WITHOUT prefetching on 2-hour dataset."""
-    fm = FileManager(n_prefetch=0, cache_capacity_multiplier=0)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(forward_sequential_access, fm, real_life_mef3_file, 20)
-    fm.shutdown()
-
-
-@pytest.mark.benchmark
-def test_random_access_with_prefetch(benchmark, real_life_mef3_file):
-    """Benchmark random access WITH prefetching on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(random_access, fm, real_life_mef3_file, 20)
-    fm.shutdown()
-
-
-@pytest.mark.benchmark
-def test_back_and_forth_with_prefetch(benchmark, real_life_mef3_file):
-    """Benchmark back-and-forth access (viewer-like) WITH prefetching on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(back_and_forth_access, fm, real_life_mef3_file)
-    fm.shutdown()
-
-
-# --- Direct MefReader Comparison Benchmarks ---
-
-def direct_mef_reader_access(file_path, num_chunks=5):
-    """Read data directly using MefReader (bypassing FileManager and gRPC).
-    
-    Note: Header reading is done once before benchmarking starts.
+def grpc_viewer_pattern(client, file_path, num_chunks):
     """
-    rdr = MefReader(file_path)
-    channels = rdr.channels
-    start_uutc = min(rdr.get_property('start_time'))
-    end_uutc = max(rdr.get_property('end_time'))
-    
-    # Calculate chunk boundaries (60 second chunks)
-    chunk_duration_us = 60 * 1e6
-    
-    for i in range(num_chunks):
-        chunk_start = int(start_uutc + i * chunk_duration_us)
-        chunk_end = int(min(chunk_start + chunk_duration_us, end_uutc))
-        # Read data for this chunk
-        data = rdr.get_data(channels, chunk_start, chunk_end)
-        _ = np.array(data)
+    Simulate viewer usage: navigate forward a bit, then backward, then forward again.
+    Total: 20 chunk accesses for consistency with other benchmarks.
+    """
+    # Forward: 0-9 (10 chunks)
+    for i in range(10):
+        _ = client.get_signal_segment(file_path, i)
+    # Backward: 9-5 (5 chunks)
+    for i in range(9, 4, -1):
+        _ = client.get_signal_segment(file_path, i)
+    # Forward: 5-9 (5 chunks)
+    for i in range(5, 10):
+        _ = client.get_signal_segment(file_path, i)
 
 
-@pytest.mark.benchmark
-def test_direct_mef_reader(benchmark, real_life_mef3_file):
-    """Benchmark direct MefReader access (no FileManager, no gRPC) on 2-hour dataset."""
-    # Pre-read header outside of benchmark
-    rdr = MefReader(real_life_mef3_file)
-    _ = rdr.channels
-    _ = rdr.get_property('start_time')
-    _ = rdr.get_property('end_time')
-    del rdr
-    
-    benchmark(direct_mef_reader_access, real_life_mef3_file, 20)
-
-
-@pytest.mark.benchmark
-def test_file_manager_vs_direct(benchmark, real_life_mef3_file):
-    """Benchmark FileManager access (with prefetch) vs direct MefReader on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    
-    # Use same access pattern as direct reader for fair comparison
-    benchmark(forward_sequential_access, fm, real_life_mef3_file, 20)
-    fm.shutdown()
-
-
-# --- Concurrent Client Benchmarks ---
-
-def concurrent_access_pattern(file_manager, file_path, num_clients, num_chunks=5):
-    """Simulate multiple clients accessing data concurrently."""
+def grpc_concurrent_access(client, file_path, num_clients, chunks_per_client):
+    """Simulate multiple concurrent clients accessing data via gRPC."""
     def client_work():
-        for i in range(num_chunks):
-            _ = list(file_manager.get_signal_segment(file_path, i))
+        for i in range(chunks_per_client):
+            _ = client.get_signal_segment(file_path, i)
     
     threads = []
     for _ in range(num_clients):
@@ -154,50 +74,214 @@ def concurrent_access_pattern(file_manager, file_path, num_clients, num_chunks=5
         thread.join()
 
 
-@pytest.mark.benchmark
-def test_concurrent_2_clients(benchmark, real_life_mef3_file):
-    """Benchmark with 2 concurrent clients on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(concurrent_access_pattern, fm, real_life_mef3_file, 2, 10)
-    fm.shutdown()
-
-
-@pytest.mark.benchmark
-def test_concurrent_5_clients(benchmark, real_life_mef3_file):
-    """Benchmark with 5 concurrent clients on 2-hour dataset."""
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(concurrent_access_pattern, fm, real_life_mef3_file, 5, 10)
-    fm.shutdown()
-
-
-# --- Dynamic Parameter Change Benchmarks ---
-
-def dynamic_parameter_changes(file_manager, file_path):
+def direct_mef_reader_access(file_path, num_chunks):
     """
-    Test server flexibility with frequent parameter changes.
-    Simulates real-world usage where window sizes change frequently.
+    Read data directly using MefReader (no server, no cache).
+    Baseline for comparison.
     """
-    window_sizes = [30, 60, 120, 300, 60, 30]  # Realistic window size changes
+    rdr = MefReader(file_path)
+    channels = rdr.channels
+    start_uutc = min(rdr.get_property('start_time'))
+    end_uutc = max(rdr.get_property('end_time'))
     
-    for window_size in window_sizes:
-        file_manager.set_signal_segment_size(file_path, seconds=window_size)
-        # Access a few segments after each change
-        for i in range(3):
-            _ = list(file_manager.get_signal_segment(file_path, i))
+    # 60 second chunks
+    chunk_duration_us = 60 * 1e6
+    
+    for i in range(num_chunks):
+        chunk_start = int(start_uutc + i * chunk_duration_us)
+        chunk_end = int(min(chunk_start + chunk_duration_us, end_uutc))
+        data = rdr.get_data(channels, chunk_start, chunk_end)
+        _ = np.array(data)
+
+
+# --- Benchmark Tests ---
+
+@pytest.mark.benchmark
+def test_baseline_direct_mef_reader(benchmark, benchmark_mef3_file):
+    """
+    BASELINE: Direct MefReader access (no server, no cache).
+    20 chunks, 60s each.
+    """
+    # Pre-read header outside of benchmark
+    rdr = MefReader(benchmark_mef3_file)
+    _ = rdr.channels
+    _ = rdr.get_property('start_time')
+    _ = rdr.get_property('end_time')
+    del rdr
+    
+    benchmark(direct_mef_reader_access, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
 
 
 @pytest.mark.benchmark
-def test_dynamic_window_changes(benchmark, real_life_mef3_file):
+def test_grpc_sequential_forward_with_prefetch(benchmark, benchmark_mef3_file, grpc_server):
     """
-    Benchmark server performance with frequent window size changes.
-    Tests cache invalidation and prefetch handling on 2-hour dataset.
+    Sequential forward access via gRPC WITH prefetching.
+    20 chunks, 60s each.
     """
-    fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, max_workers=4)
-    fm.open_file(real_life_mef3_file)
-    fm.set_signal_segment_size(real_life_mef3_file, seconds=60)
-    benchmark(dynamic_parameter_changes, fm, real_life_mef3_file)
-    fm.shutdown()
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_sequential_forward, client, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_sequential_forward_no_prefetch(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    Sequential forward access via gRPC WITHOUT prefetching.
+    20 chunks, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup - use server with n_prefetch=0 (handled by FileManager config)
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_sequential_forward, client, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_sequential_backward(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    Sequential backward access via gRPC with prefetching.
+    20 chunks, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_sequential_backward, client, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_random_access(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    Random access via gRPC with prefetching.
+    20 chunks, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_random_access, client, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_viewer_pattern(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    Viewer usage pattern via gRPC (forward, backward, forward navigation).
+    20 chunks total, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_viewer_pattern, client, benchmark_mef3_file, BENCHMARK_NUM_CHUNKS)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_concurrent_2_clients(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    2 concurrent clients via gRPC, each accessing 10 chunks.
+    Total: 20 chunk accesses, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_concurrent_access, client, benchmark_mef3_file, 2, 10)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_concurrent_4_clients(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    4 concurrent clients via gRPC, each accessing 5 chunks.
+    Total: 20 chunk accesses, 60s each.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    # Setup
+    client.open_file(benchmark_mef3_file)
+    client.set_signal_segment_size(benchmark_mef3_file, BENCHMARK_SEGMENT_SIZE_S)
+    
+    # Benchmark
+    benchmark(grpc_concurrent_access, client, benchmark_mef3_file, 4, 5)
+    
+    # Cleanup
+    client.close_file(benchmark_mef3_file)
+    client.shutdown()
+
+
+@pytest.mark.benchmark
+def test_grpc_dynamic_window_changes(benchmark, benchmark_mef3_file, grpc_server):
+    """
+    Test server flexibility with dynamic window size changes.
+    Changes window sizes and accesses data after each change.
+    Total: ~18 chunk accesses across different window sizes.
+    """
+    port = grpc_server["port"]
+    client = Mef3Client(f"localhost:{port}")
+    
+    def dynamic_changes():
+        client.open_file(benchmark_mef3_file)
+        # Change window sizes and access data
+        window_sizes = [30, 60, 120, 300, 60, 30]
+        for window_size in window_sizes:
+            client.set_signal_segment_size(benchmark_mef3_file, window_size)
+            # Access 3 segments after each window change
+            for i in range(3):
+                _ = client.get_signal_segment(benchmark_mef3_file, i)
+        client.close_file(benchmark_mef3_file)
+    
+    # Benchmark
+    benchmark(dynamic_changes)
+    
+    # Cleanup
+    client.shutdown()

@@ -1,100 +1,22 @@
 
-
-from mef_tools import MefReader, MefWriter
+from bnel_mef3_server.client import Mef3Client
+from tests.conftest import MEF3_TEST_FS, MEF3_TEST_CHANNELS, MEF3_FUNCTIONAL_TEST_DURATION_S
 
 import numpy as np
-import pathlib
-import os
-from datetime import datetime
-
 import pytest
 from tqdm import tqdm
 
-from bnel_mef3_server.client import Mef3Client
-import bnel_mef3_server.server
-
-import multiprocessing
-import time
-import pytest
-from bnel_mef3_server.server.__main__ import main as server_entrypoint
-
-
-@pytest.fixture(scope="function")
-def launch_server_process():
-    """
-    Launches the gRPC server main() in a separate process.
-    """
-    # Initialize process targeting the main entrypoint
-    proc = multiprocessing.Process(target=server_entrypoint, daemon=True)
-    proc.start()
-
-    # Wait for the server to bind the port
-    time.sleep(2)
-
-    yield
-
-    # Terminate the process (triggers handle_sigterm in main)
-    proc.terminate()
-    proc.join(timeout=5)
-    # Give a bit more time for the port to be released
-    time.sleep(0.5)
-
-
-# MEF3 test data configuration constants
-MEF3_TEST_CHANNELS = 64
-MEF3_TEST_FS = 256
-MEF3_TEST_DURATION_S = 60 * 60  # 1 hour for tests
-MEF3_TEST_PRECISION = 2
-# Timestamp 100 days in the past (to simulate historical data)
-MEF3_TEST_START_OFFSET_DAYS = 100
-
-
-@pytest.fixture(scope="module")
-def real_life_test_file(tmp_path_factory):
-    """
-    Creates a realistic MEF3 file for real-life testing.
-    - 64 channels
-    - 256 Hz sampling rate
-    - 1 hour of data
-    - precision=2 as specified
-    - Timestamp set 100 days in past to simulate historical data
-    
-    Note: Uses module scope so the file is created once for all tests in this module,
-    significantly improving test performance.
-    """
-    # Use tmp_path_factory for module-scoped fixtures
-    tmpdir = tmp_path_factory.mktemp("real_life_data")
-    pth = str(tmpdir)
-    pth_mef = os.path.join(pth, "big_data_demo.mefd")
-    
-    wrt = MefWriter(pth_mef, overwrite=True)
-    wrt.mef_block_len = 10000
-    wrt.max_nans_written = 0
-    
-    # Use consistent timestamp in microseconds (MEF3 standard)
-    # Set 100 days in the past to simulate historical data
-    s = (datetime.now().timestamp() - 3600*24*MEF3_TEST_START_OFFSET_DAYS) * 1e6
-    
-    print("\n[Creating test MEF3 file - this happens once per module]")
-    for idx in tqdm(range(MEF3_TEST_CHANNELS), desc="Creating test MEF3 file"):
-        chname = f"chan_{idx+1:03d}"
-        x = np.random.randn(MEF3_TEST_DURATION_S * MEF3_TEST_FS)
-        wrt.write_data(x, chname, s, MEF3_TEST_FS, precision=MEF3_TEST_PRECISION)
-    print("[Test MEF3 file created successfully]")
-    
-    return pth_mef
-
 
 @pytest.mark.slow
-def test_real_life_data(real_life_test_file, launch_server_process):
+def test_real_life_data(functional_test_mef3_file, launch_server_process):
     """
     Test real-world usage patterns with dynamic parameter changes.
     Tests server flexibility with window size and active channel changes.
     """
-    pth_mef = real_life_test_file
+    pth_mef = functional_test_mef3_file
     fs = MEF3_TEST_FS
     n_channels = MEF3_TEST_CHANNELS
-    data_len_s = MEF3_TEST_DURATION_S
+    data_len_s = MEF3_FUNCTIONAL_TEST_DURATION_S
 
     cl = Mef3Client("localhost:50051")
     cl.open_file(pth_mef)
@@ -149,12 +71,12 @@ def test_real_life_data(real_life_test_file, launch_server_process):
 
 
 @pytest.mark.slow
-def test_dynamic_parameter_changes(real_life_test_file, launch_server_process):
+def test_dynamic_parameter_changes(functional_test_mef3_file, launch_server_process):
     """
     Test that the server handles frequent parameter changes gracefully.
     This simulates real-world usage where users frequently adjust window sizes and channels.
     """
-    pth_mef = real_life_test_file
+    pth_mef = functional_test_mef3_file
     fs = MEF3_TEST_FS
     
     cl = Mef3Client("localhost:50051")
@@ -199,12 +121,12 @@ def test_dynamic_parameter_changes(real_life_test_file, launch_server_process):
 
 
 @pytest.mark.slow
-def test_error_handling(real_life_test_file, launch_server_process):
+def test_error_handling(functional_test_mef3_file, launch_server_process):
     """
     Test that server errors are properly caught and returned to the client.
     No server crashes should occur.
     """
-    pth_mef = real_life_test_file
+    pth_mef = functional_test_mef3_file
     
     cl = Mef3Client("localhost:50051")
     
