@@ -51,18 +51,18 @@ class FileManager:
         """
         self._files = {}
         self._lock = threading.Lock()
-        # OPTIMIZATION: Dedicated I/O lock to serialize disk reads and eliminate contention
-        self._io_lock = threading.Lock()
 
         # --- Configuration for caching ---
-        self.n_prefetch = n_prefetch  # Number of chunks to prefetch before and after
+        self.n_prefetch = n_prefetch  # Number of chunks to prefetch ahead
         self.cache_capacity = (n_prefetch * 2) + cache_capacity_multiplier
 
         # --- Dedicated thread pool for background data loading ---
+        # Allow parallel workers for decompression (most time is spent here, not I/O)
         self._prefetch_executor = futures.ThreadPoolExecutor(
             max_workers=max_workers, thread_name_prefix='cache_prefetch'
         )
-        # Track in-progress prefetches: {file_path: {chunk_idx: threading.Event}}
+        # Track in-progress prefetches with Events: {file_path: {chunk_idx: threading.Event}}
+        # Events allow waiting for chunk completion
         self._in_progress = {}
         # Track last requested chunk per file for sequential access detection
         self._last_chunk = {}
@@ -106,17 +106,14 @@ class FileManager:
             rdr = state['reader']
             chunk_info = chunks[chunk_idx]
 
-        # --- Data reading happens outside the main lock but WITH I/O lock ---
+        # --- Data reading happens outside the main lock (allows parallel decompression) ---
         try:
-            # OPTIMIZATION: Serialize I/O operations to eliminate disk contention
-            with self._io_lock:
-                # OPTIMIZATION: Load all channels in prefetch (active channel filtering happens in get_signal_segment)
-                # We load all channels here because prefetch happens asynchronously and we don't know which
-                # channels will be active when the chunk is requested. This trades memory for flexibility,
-                # allowing the cache to serve requests with different active channel configurations.
-                channels = rdr.channels
-                data = rdr.get_data(channels, chunk_info['start'], chunk_info['end'])
-                data = np.array(data)
+            # Load all channels in prefetch (active channel filtering happens in get_signal_segment)
+            # We load all channels here because prefetch happens asynchronously and we don't know which
+            # channels will be active when the chunk is requested. This trades memory for flexibility.
+            channels = rdr.channels
+            data = rdr.get_data(channels, chunk_info['start'], chunk_info['end'])
+            data = np.array(data)
 
             # --- Put loaded data into the cache only if chunk info is still valid ---
             # This prevents stale data from being cached if segment size changed during prefetch
@@ -226,21 +223,12 @@ class FileManager:
                     error_message=f"Invalid chunk request: {chunk_idx} for {file_path}"
                 )
                 return
-            # --- OPTIMIZATION: Smart forward-only prefetching for sequential access ---
-            # Only prefetch if this looks like sequential forward access
-            # This reduces unnecessary prefetching and I/O contention
+            
+            # Track last chunk for sequential detection
             last_chunk_idx = self._last_chunk.get(file_path, -1)
-            # Sequential access: first chunk (0), or the next chunk after the previous one
-            is_sequential_forward = (chunk_idx == 0 or chunk_idx == last_chunk_idx + 1)
             self._last_chunk[file_path] = chunk_idx
             
-            if is_sequential_forward:
-                with self._lock:
-                    for i in range(1, self.n_prefetch + 1):
-                        future_chunk = chunk_idx + i
-                        if future_chunk < len(chunks) and future_chunk not in cache and future_chunk not in in_progress:
-                            self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, future_chunk)
-            
+            # --- Try to get from cache first ---
             data = cache.get(chunk_idx)
             if data is not None:
                 # --- CACHE HIT ---
@@ -275,10 +263,9 @@ class FileManager:
                     # --- CACHE MISS (not in progress or prefetch failed) ---
                     try:
                         chunk_info = chunks[chunk_idx]
-                        # OPTIMIZATION: Serialize I/O operations to eliminate disk contention
-                        with self._io_lock:
-                            data = rdr.get_data(active_channels, chunk_info['start'], chunk_info['end'])
-                            data = np.array(data)
+                        # Load data (allows parallel decompression across multiple threads)
+                        data = rdr.get_data(active_channels, chunk_info['start'], chunk_info['end'])
+                        data = np.array(data)
                         cache.put(chunk_idx, data)
                     except Exception as e:
                         logger.error(f"Error loading chunk {chunk_idx} for {file_path}: {e}")
@@ -321,6 +308,16 @@ class FileManager:
                     channel_names=active_channels,
                     error_message=""
                 )
+            
+            # --- PREFETCHING: Trigger after serving current chunk ---
+            # This happens while client is processing the data
+            # Prefetch next n_prefetch chunks for sequential forward access
+            with self._lock:
+                for i in range(1, self.n_prefetch + 1):
+                    future_chunk = chunk_idx + i
+                    if future_chunk < len(chunks) and future_chunk not in cache and future_chunk not in in_progress:
+                        self._prefetch_executor.submit(self._load_and_cache_chunk, file_path, future_chunk)
+                        
         except Exception as e:
             logger.error(f"Unexpected error in get_signal_segment: {e}")
             yield gRPCMef3Server_pb2.SignalChunk(
