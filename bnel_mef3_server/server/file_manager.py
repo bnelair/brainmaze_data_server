@@ -45,7 +45,7 @@ class FileManager:
         Initialize the FileManager.
 
         Args:
-            n_prefetch (int): Number of chunks to prefetch before and after each request.
+            n_prefetch (int): Number of chunks to prefetch ahead for sequential access.
             cache_capacity_multiplier (int): Additional cache capacity beyond the prefetch window.
             max_workers (int): Maximum number of background threads for prefetching.
         """
@@ -54,7 +54,8 @@ class FileManager:
 
         # --- Configuration for caching ---
         self.n_prefetch = n_prefetch  # Number of chunks to prefetch ahead
-        self.cache_capacity = (n_prefetch * 2) + cache_capacity_multiplier
+        # Capacity: n_prefetch ahead + extra for keeping past chunks (backward navigation)
+        self.cache_capacity = n_prefetch + cache_capacity_multiplier
 
         # --- Dedicated thread pool for background data loading ---
         # Allow parallel workers for decompression (most time is spent here, not I/O)
