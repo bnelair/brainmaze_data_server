@@ -16,8 +16,8 @@ import time
 BENCHMARK_NUM_CHUNKS = 10  # All benchmarks use 20 chunks for fair comparison
 BENCHMARK_SEGMENT_SIZE_S = 5*60  # 60 second segments
 ROUNDS = 1
-SLEEP_SECONDS = 0.1 # simulating processing delay
-N_PREFETCH = 4
+SLEEP_SECONDS = 0.3 # simulating processing delay
+N_PREFETCH = 1
 MAX_WORKERS = 20
 CACHE_CAPACITY_MULTIPLIER = 30
 
@@ -26,9 +26,11 @@ CACHE_CAPACITY_MULTIPLIER = 30
 def grpc_sequential_forward(client, file_path, num_chunks):
     """Access chunks in forward sequential order via gRPC."""
     for i in range(num_chunks):
+        ts = time.time()
         _ = client.get_signal_segment(file_path, i)
+        te = time.time()
+        # print(f"gRPCReader - Chunk {i} read in {te - ts} seconds")
         time.sleep(SLEEP_SECONDS)  # Simulate slight processing delay
-
 
 
 
@@ -45,8 +47,10 @@ def direct_mef_reader_access(rdr, num_chunks):
     for i in range(num_chunks):
         chunk_start = start + i * chunk_duration
         chunk_end = chunk_start + chunk_duration
-        print(f"Reading chunk {i}: {chunk_start} to {chunk_end}")
+        ts = time.time()
         data = rdr.get_data(channels, chunk_start*1e6, chunk_end*1e6)
+        te = time.time()
+        # print(f"MefReader - Chunk {i} read in {te - ts} seconds")
         time.sleep(SLEEP_SECONDS)  # Simulate slight processing delay
 
 
@@ -70,7 +74,7 @@ def test_grpc_sequential_forward_with_prefetch(benchmark, benchmark_mef3_file, g
     Sequential forward access via gRPC WITH prefetching.
     20 chunks, 60s each.
     """
-    port = grpc_server_factory(n_prefetch=4, cache_capacity_multiplier=20, max_workers=5)
+    port = grpc_server_factory(n_prefetch=N_PREFETCH, cache_capacity_multiplier=CACHE_CAPACITY_MULTIPLIER, max_workers=MAX_WORKERS)
     client = Mef3Client(f"localhost:{port}")
     
     # Setup
