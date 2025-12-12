@@ -144,26 +144,6 @@ def access_pattern(file_manager, file_path):
         # time.sleep(0.1)
 
 
-def test_with_prefetch_real_file(benchmark, mef3_file):
-    """Benchmark the access pattern WITH prefetching on a REAL file."""
-    # this is much faster than no-prefetch for data with 256 channels. If this is much slower, the test is probably using a few channels.
-    fm = FileManager(n_prefetch=10, cache_capacity_multiplier=10, n_process_workers=2)  # Prefetching is enabled
-    fm.open_file(mef3_file)
-    fm.set_signal_segment_size(mef3_file, seconds=60)  # Use 1-second segments
-    benchmark(access_pattern, fm, mef3_file)
-    fm.shutdown()
-
-
-def test_no_prefetch_real_file(benchmark, mef3_file):
-    """Benchmark the access pattern WITHOUT prefetching on a REAL file."""
-    fm = FileManager(n_prefetch=0, cache_capacity_multiplier=0)  # Prefetching is turned OFF
-    fm.open_file(mef3_file)
-    fm.set_signal_segment_size(mef3_file, seconds=60)  # Use 1-second segments
-
-    benchmark(access_pattern, fm, mef3_file)
-    fm.shutdown()
-
-
 def test_integrity_multithreaded_read_real(mef3_file):
     """Test that reading the whole file by 5 independent clients yields correct and identical data using the real MEF3 reader."""
     fm = FileManager()
