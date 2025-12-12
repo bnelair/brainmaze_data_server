@@ -7,6 +7,7 @@ pymef's global variable limitations.
 """
 
 import multiprocessing as mp
+import queue
 import numpy as np
 from mef_tools import MefReader
 from bnel_mef3_server.server.log_manager import get_logger
@@ -279,7 +280,7 @@ class MefWorkerPool:
             if task_id in self._pending_tasks:
                 del self._pending_tasks[task_id]
             return result
-        except mp.queues.Empty:
+        except queue.Empty:
             return None
             
     def close_file(self, file_path):

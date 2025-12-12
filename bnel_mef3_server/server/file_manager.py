@@ -98,8 +98,8 @@ class FileManager:
         self._in_progress = {}
         # Track last requested chunk per file for sequential access detection
         self._last_chunk = {}
-        # Track chunk-to-file mapping for worker results
-        self._chunk_file_map = {}  # chunk_idx -> file_path
+        # Track task-to-file mapping for worker results
+        self._task_file_map = {}  # task_id -> (file_path, chunk_idx)
 
     def _coordinate_worker_results(self):
         """
@@ -120,46 +120,50 @@ class FileManager:
                 
             # Process the result
             if result['success']:
+                task_id = result['task_id']
                 chunk_idx = result['chunk_idx']
                 data = result['data']
                 worker_id = result['worker_id']
                 
-                # Find which file this belongs to using the chunk-file map
+                # Find which file this belongs to using the task-file map
                 with self._lock:
-                    file_path = self._chunk_file_map.get(chunk_idx)
-                    if file_path and file_path in self._files:
-                        state = self._files[file_path]
-                        cache = state['cache']
-                        chunks = state['chunks']
-                        in_progress = self._in_progress.get(file_path, {})
-                        
-                        # Verify chunk is still valid
-                        if chunks and 0 <= chunk_idx < len(chunks):
-                            cache.put(chunk_idx, data)
-                            logger.debug(f"Worker {worker_id} completed prefetch of chunk {chunk_idx} for {file_path}")
-                        
-                        # Mark as complete
-                        event = in_progress.get(chunk_idx)
-                        if event:
-                            event.set()
-                            in_progress.pop(chunk_idx, None)
+                    mapping = self._task_file_map.get(task_id)
+                    if mapping:
+                        file_path, expected_chunk_idx = mapping
+                        if file_path in self._files and chunk_idx == expected_chunk_idx:
+                            state = self._files[file_path]
+                            cache = state['cache']
+                            chunks = state['chunks']
+                            in_progress = self._in_progress.get(file_path, {})
+                            
+                            # Verify chunk is still valid
+                            if chunks and 0 <= chunk_idx < len(chunks):
+                                cache.put(chunk_idx, data)
+                                logger.debug(f"Worker {worker_id} completed prefetch of chunk {chunk_idx} for {file_path}")
+                            
+                            # Mark as complete
+                            event = in_progress.get(chunk_idx)
+                            if event:
+                                event.set()
+                                in_progress.pop(chunk_idx, None)
                         
                         # Clean up mapping
-                        self._chunk_file_map.pop(chunk_idx, None)
+                        self._task_file_map.pop(task_id, None)
             else:
                 # Handle error
                 logger.error(f"Worker {result.get('worker_id')} failed: {result.get('error')}")
                 # Mark the task as complete even on error
-                chunk_idx = result['chunk_idx']
+                task_id = result.get('task_id')
                 with self._lock:
-                    file_path = self._chunk_file_map.get(chunk_idx)
-                    if file_path:
+                    mapping = self._task_file_map.get(task_id)
+                    if mapping:
+                        file_path, chunk_idx = mapping
                         in_progress = self._in_progress.get(file_path, {})
                         event = in_progress.get(chunk_idx)
                         if event:
                             event.set()
                             in_progress.pop(chunk_idx, None)
-                        self._chunk_file_map.pop(chunk_idx, None)
+                        self._task_file_map.pop(task_id, None)
                             
         logger.info("Worker coordinator thread exiting")
 
@@ -207,18 +211,19 @@ class FileManager:
         # --- Try to use worker process for parallel reading ---
         if use_worker and self._worker_pool:
             try:
-                # Register the chunk-file mapping for the coordinator
-                with self._lock:
-                    self._chunk_file_map[chunk_idx] = file_path
-                
                 # Submit to worker pool (reads all channels for flexibility)
-                self._worker_pool.submit_read_task(
+                task_id = self._worker_pool.submit_read_task(
                     actual_path,
                     chunk_idx,
                     chunk_info['start'],
                     chunk_info['end'],
                     channels=None  # Load all channels in worker
                 )
+                
+                # Register the task-file mapping for the coordinator (after successful submission)
+                with self._lock:
+                    self._task_file_map[task_id] = (file_path, chunk_idx)
+                
                 # The coordinator thread will handle the result
                 return
             except Exception as e:
@@ -228,7 +233,6 @@ class FileManager:
                     # Clear the in-progress marker since we're going to retry
                     if file_path in self._in_progress:
                         self._in_progress[file_path].pop(chunk_idx, None)
-                    self._chunk_file_map.pop(chunk_idx, None)
                     event.set()
                 # Recursive call with use_worker=False to use main thread
                 return self._load_and_cache_chunk(file_path, chunk_idx, use_worker=False)
