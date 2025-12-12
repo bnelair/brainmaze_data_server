@@ -131,14 +131,14 @@ class gRPCMef3Server(gRPCMef3Server_pb2_grpc.gRPCMef3ServerServicer):
 class gRPCMef3ServerHandler:
     """Handler to launch and manage the gRPC MEF3 server lifecycle."""
 
-    def __init__(self, port, n_prefetch=3, cache_capacity_multiplier=3, max_workers=4):
+    def __init__(self, port, n_prefetch=3, cache_capacity_multiplier=3, n_process_workers=2):
         """Initializes the gRPC server and FileManager.
 
         Args:
             port (int): Port to listen on.
             n_prefetch (int): Number of chunks to prefetch.
             cache_capacity_multiplier (int): Cache capacity multiplier.
-            max_workers (int): Max worker threads for prefetching.
+            n_process_workers (int): Number of worker processes for parallel MEF reading.
         """
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
 
@@ -146,7 +146,7 @@ class gRPCMef3ServerHandler:
         self.file_manager = FileManager(
             n_prefetch=n_prefetch,
             cache_capacity_multiplier=cache_capacity_multiplier,
-            max_workers=max_workers
+            n_process_workers=n_process_workers
         )
 
         gRPCMef3Server_pb2_grpc.add_gRPCMef3ServerServicer_to_server(

@@ -21,15 +21,15 @@ def main():
     port = int(os.environ.get("PORT", 50051))
     n_prefetch = int(os.environ.get("N_PREFETCH", 3))
     cache_capacity_multiplier = int(os.environ.get("CACHE_CAPACITY_MULTIPLIER", 3))
-    max_workers = int(os.environ.get("MAX_WORKERS", 4))
+    n_process_workers = int(os.environ.get("N_PROCESS_WORKERS", 2))
 
-    print(f"Starting gRPC MEF3 server on port {port} with FileManager config: n_prefetch={n_prefetch}, cache_capacity_multiplier={cache_capacity_multiplier}, max_workers={max_workers}")
+    print(f"Starting gRPC MEF3 server on port {port} with FileManager config: n_prefetch={n_prefetch}, cache_capacity_multiplier={cache_capacity_multiplier}, n_process_workers={n_process_workers}")
 
     handler = gRPCMef3ServerHandler(
         port=port,
         n_prefetch=n_prefetch,
         cache_capacity_multiplier=cache_capacity_multiplier,
-        max_workers=max_workers
+        n_process_workers=n_process_workers
     )
 
     def handle_sigterm(signum, frame):

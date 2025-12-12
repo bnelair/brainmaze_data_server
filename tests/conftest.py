@@ -146,10 +146,10 @@ def launch_server_process():
 
 
 # --- Server and Client Fixtures ---------------------------------------
-def create_grpc_server(n_prefetch, cache_capacity_multiplier, max_workers):
+def create_grpc_server(n_prefetch, cache_capacity_multiplier, n_process_workers=0):
     """Factory function to create a gRPC server with specific FileManager settings."""
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-    file_manager = FileManager(n_prefetch, cache_capacity_multiplier, max_workers)
+    file_manager = FileManager(n_prefetch, cache_capacity_multiplier, n_process_workers)
     servicer = gRPCMef3Server(file_manager)
     pb2_grpc.add_gRPCMef3ServerServicer_to_server(servicer, server)
     return server
@@ -162,16 +162,17 @@ def grpc_server_factory():
     Handles teardown automatically.
     """
     servers = []
+    file_managers = []
     # Start port allocation from a base number
     next_port = 50060
 
-    def _server_starter(n_prefetch, cache_capacity_multiplier, max_workers):
+    def _server_starter(n_prefetch, cache_capacity_multiplier, n_process_workers=0):
         nonlocal next_port
         port = next_port
         # Increment port number to ensure each server in a test run gets a unique port
         next_port += 1
 
-        server = create_grpc_server(n_prefetch, cache_capacity_multiplier, max_workers)
+        server = create_grpc_server(n_prefetch, cache_capacity_multiplier, n_process_workers)
         server.add_insecure_port(f"localhost:{port}")
 
         server_thread = threading.Thread(target=server.start, daemon=True)
@@ -179,7 +180,7 @@ def grpc_server_factory():
         time.sleep(0.1)
 
         servers.append(server)
-        print(f"\nStarted test gRPC server on port {port} with n_prefetch={n_prefetch}")
+        print(f"\nStarted test gRPC server on port {port} with n_prefetch={n_prefetch}, n_process_workers={n_process_workers}")
         return port
 
     yield _server_starter
@@ -200,10 +201,10 @@ def shared_test_server():
     Creates a shared gRPC server for testing with multiple stubs.
     Uses threading instead of multiprocessing to avoid fork issues.
     """
-    # Create server with default settings
+    # Create server with default settings (n_process_workers=0 for testing to avoid complexity)
     # Use port 50052 to avoid conflict with launch_server_process (port 50051)
     port = 50052
-    server = create_grpc_server(n_prefetch=3, cache_capacity_multiplier=3, max_workers=4)
+    server = create_grpc_server(n_prefetch=3, cache_capacity_multiplier=3, n_process_workers=0)
     server.add_insecure_port(f"localhost:{port}")
     
     # Start server in a thread

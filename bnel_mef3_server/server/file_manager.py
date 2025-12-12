@@ -6,6 +6,7 @@ import bnel_mef3_server.protobufs.gRPCMef3Server_pb2 as gRPCMef3Server_pb2
 from bnel_mef3_server.server.cache import LRUCache
 from mef_tools import MefReader
 from bnel_mef3_server.server.log_manager import get_logger
+from bnel_mef3_server.server.mef_worker import MefWorkerPool
 import os
 
 logger = get_logger("bnel_mef3_server.file_manager")
@@ -32,22 +33,109 @@ class FileManager:
     This class provides efficient, concurrent access to MEF3 files, including:
       - File open/close and info management
       - LRU caching and asynchronous prefetching of signal segments
+      - Multi-process parallel reading to work around pymef global variable limitations
       - Chunking of signal data for streaming
       - Active channel selection and order preservation
       - Error handling for invalid requests and file states
 
     Thread safety is ensured via a lock for all state-changing operations. Each file is managed independently.
     The cache and prefetching system is designed for high-throughput, low-latency access to large files.
+    
+    Architecture:
+      - Main thread: Has a MefReader for metadata and synchronous reads (cache misses)
+      - Worker processes (configurable): Each has its own MefReader for parallel prefetching
+      - Coordinator thread: Manages prefetch tasks and collects results from workers
     """
 
-    def __init__(self, n_prefetch=2, cache_capacity_multiplier=5, max_workers=4):
+    def __init__(self, n_prefetch=2, cache_capacity_multiplier=5, n_process_workers=2):
         """
-        Initialize the FileManager.
+        Initialize the FileManager with caching and parallel reading support.
+
+        The FileManager coordinates data access across multiple MEF files using a sophisticated
+        caching and prefetching system. It employs a multi-process architecture to achieve
+        true parallel I/O, working around pymef's global variable limitations.
+
+        **Architecture Overview:**
+        
+        1. **Main Thread Reader**: 
+           - Handles synchronous operations (metadata queries, cache misses)
+           - Contains a MefReader instance for immediate data access
+           
+        2. **Worker Processes** (n_process_workers):
+           - Each runs in a separate Python process with isolated MefReader
+           - Performs parallel prefetching of future segments
+           - Communicates via multiprocessing queues
+           
+        3. **Coordinator Thread**:
+           - Collects results from worker processes
+           - Updates the LRU cache with prefetched data
+           - Ensures thread-safe cache operations
+           
+        4. **Fallback Thread Pool**:
+           - Handles prefetch task submission when workers unavailable
+           - Provides graceful degradation if workers crash
+        
+        **Caching Strategy:**
+        
+        The LRU cache stores recently accessed segments with capacity:
+        `cache_capacity = n_prefetch + cache_capacity_multiplier`
+        
+        - `n_prefetch`: Forward-looking segments for sequential access
+        - `cache_capacity_multiplier`: Additional slots for backward navigation
+        
+        When a segment is requested:
+        1. Check cache → return immediately if hit
+        2. Check if prefetch in progress → wait for completion
+        3. Read from disk (main thread) → cache the result
+        4. Trigger prefetch for next n_prefetch segments via worker processes
+        
+        **Prefetch Workflow:**
+        
+        ```
+        Client Request (segment N)
+              ↓
+        [Cache Hit?] → Yes → Return immediately
+              ↓ No
+        [Prefetch pending?] → Yes → Wait for worker
+              ↓ No
+        Load from disk (main thread)
+              ↓
+        Submit prefetch tasks for segments N+1, N+2, ..., N+n_prefetch
+              ↓
+        Worker processes read in parallel
+              ↓
+        Coordinator thread caches results
+              ↓
+        Future requests hit cache
+        ```
 
         Args:
-            n_prefetch (int): Number of chunks to prefetch ahead for sequential access.
-            cache_capacity_multiplier (int): Additional cache capacity beyond the prefetch window.
-            max_workers (int): Maximum number of background threads for prefetching.
+            n_prefetch (int): Number of segments to prefetch ahead during sequential access.
+                Higher values improve streaming performance but use more memory.
+                Recommended: 3-5 for sequential access, 1-2 for random access.
+                Default: 2
+                
+            cache_capacity_multiplier (int): Extra cache slots beyond the prefetch window.
+                Allows caching of previously accessed segments for backward navigation.
+                Total cache capacity = n_prefetch + cache_capacity_multiplier
+                Recommended: 5-10 for viewer apps, 3-5 for analysis workflows.
+                Default: 5
+                
+            n_process_workers (int): Number of worker processes for parallel MEF reading.
+                Each worker has an independent MefReader, enabling true parallel I/O.
+                Set to 0 to disable parallel reading (useful for debugging).
+                Recommended: 2-4 for SSD storage, 0-1 for network storage.
+                Default: 2
+
+        Example:
+            >>> # Sequential streaming with aggressive prefetch
+            >>> fm = FileManager(n_prefetch=10, cache_capacity_multiplier=15, n_process_workers=4)
+            >>> 
+            >>> # Random access with large cache
+            >>> fm = FileManager(n_prefetch=2, cache_capacity_multiplier=20, n_process_workers=2)
+            >>> 
+            >>> # Debug mode (single process)
+            >>> fm = FileManager(n_prefetch=3, cache_capacity_multiplier=5, n_process_workers=0)
         """
         self._files = {}
         self._lock = threading.Lock()
@@ -57,24 +145,117 @@ class FileManager:
         # Capacity: n_prefetch ahead + extra for keeping past chunks (backward navigation)
         self.cache_capacity = n_prefetch + cache_capacity_multiplier
 
-        # --- Dedicated thread pool for background data loading ---
-        # Allow parallel workers for decompression (most time is spent here, not I/O)
+        # --- Multi-process worker pool for parallel MEF reading ---
+        self.n_process_workers = n_process_workers
+        self._worker_pool = None
+        if n_process_workers > 0:
+            self._worker_pool = MefWorkerPool(n_workers=n_process_workers)
+            self._worker_pool.start()
+            logger.info(f"Started {n_process_workers} worker processes for parallel MEF reading")
+        else:
+            logger.info("Running in single-process mode (n_process_workers=0)")
+
+        # --- Coordinator thread for collecting worker results ---
+        self._coordinator_thread = None
+        self._coordinator_running = False
+        if self._worker_pool:
+            self._coordinator_running = True
+            self._coordinator_thread = threading.Thread(
+                target=self._coordinate_worker_results,
+                name='WorkerCoordinator',
+                daemon=True
+            )
+            self._coordinator_thread.start()
+
+        # --- Fallback thread pool for prefetch task submission ---
+        # Used to submit prefetch tasks to worker pool without blocking main thread
+        # Fixed size is sufficient since it only submits tasks, doesn't do I/O
         self._prefetch_executor = futures.ThreadPoolExecutor(
-            max_workers=max_workers, thread_name_prefix='cache_prefetch'
+            max_workers=4, thread_name_prefix='prefetch_submit'
         )
+        
         # Track in-progress prefetches with Events: {file_path: {chunk_idx: threading.Event}}
         # Events allow waiting for chunk completion
         self._in_progress = {}
         # Track last requested chunk per file for sequential access detection
         self._last_chunk = {}
+        # Track task-to-file mapping for worker results
+        self._task_file_map = {}  # task_id -> (file_path, chunk_idx)
+
+    def _coordinate_worker_results(self):
+        """
+        Coordinator thread that collects results from worker processes.
+        Runs continuously while the FileManager is active.
+        """
+        logger.info("Worker coordinator thread started")
+        
+        while self._coordinator_running:
+            if not self._worker_pool:
+                break
+                
+            # Get result with timeout to allow checking coordinator_running flag
+            result = self._worker_pool.get_result(timeout=0.1)
+            
+            if result is None:
+                continue
+                
+            # Process the result
+            if result['success']:
+                task_id = result['task_id']
+                chunk_idx = result['chunk_idx']
+                data = result['data']
+                worker_id = result['worker_id']
+                
+                # Find which file this belongs to using the task-file map
+                with self._lock:
+                    mapping = self._task_file_map.get(task_id)
+                    if mapping:
+                        file_path, expected_chunk_idx = mapping
+                        if file_path in self._files and chunk_idx == expected_chunk_idx:
+                            state = self._files[file_path]
+                            cache = state['cache']
+                            chunks = state['chunks']
+                            in_progress = self._in_progress.get(file_path, {})
+                            
+                            # Verify chunk is still valid
+                            if chunks and 0 <= chunk_idx < len(chunks):
+                                cache.put(chunk_idx, data)
+                                logger.debug(f"Worker {worker_id} completed prefetch of chunk {chunk_idx} for {file_path}")
+                            
+                            # Mark as complete
+                            event = in_progress.get(chunk_idx)
+                            if event:
+                                event.set()
+                                in_progress.pop(chunk_idx, None)
+                        
+                        # Clean up mapping
+                        self._task_file_map.pop(task_id, None)
+            else:
+                # Handle error
+                logger.error(f"Worker {result.get('worker_id')} failed: {result.get('error')}")
+                # Mark the task as complete even on error
+                task_id = result.get('task_id')
+                with self._lock:
+                    mapping = self._task_file_map.get(task_id)
+                    if mapping:
+                        file_path, chunk_idx = mapping
+                        in_progress = self._in_progress.get(file_path, {})
+                        event = in_progress.get(chunk_idx)
+                        if event:
+                            event.set()
+                            in_progress.pop(chunk_idx, None)
+                        self._task_file_map.pop(task_id, None)
+                            
+        logger.info("Worker coordinator thread exiting")
 
     # --- NEW: Helper method for background loading ---
-    def _load_and_cache_chunk(self, file_path, chunk_idx):
+    def _load_and_cache_chunk(self, file_path, chunk_idx, use_worker=True):
         """Worker function to load a single chunk and put it in the cache.
 
         Args:
             file_path (str): Path to the MEF file.
             chunk_idx (int): Index of the chunk to load and cache.
+            use_worker (bool): If True, delegate to worker process. If False, use main thread reader.
         """
         # Minimize lock duration - only check and mark as in-progress
         with self._lock:
@@ -106,8 +287,38 @@ class FileManager:
             # Get references we need (outside lock, these are safe to use)
             rdr = state['reader']
             chunk_info = chunks[chunk_idx]
+            actual_path = get_actual_file_path(file_path)
 
-        # --- Data reading happens outside the main lock (allows parallel decompression) ---
+        # --- Try to use worker process for parallel reading ---
+        if use_worker and self._worker_pool:
+            try:
+                # Submit to worker pool (reads all channels for flexibility)
+                task_id = self._worker_pool.submit_read_task(
+                    actual_path,
+                    chunk_idx,
+                    chunk_info['start'],
+                    chunk_info['end'],
+                    channels=None  # Load all channels in worker
+                )
+                
+                # Register the task-file mapping for the coordinator (after successful submission)
+                with self._lock:
+                    self._task_file_map[task_id] = (file_path, chunk_idx)
+                
+                # The coordinator thread will handle the result
+                return
+            except Exception as e:
+                logger.warning(f"Failed to submit to worker pool: {e}, falling back to main thread")
+                # Fall through to main thread reading
+                with self._lock:
+                    # Clear the in-progress marker since we're going to retry
+                    if file_path in self._in_progress:
+                        self._in_progress[file_path].pop(chunk_idx, None)
+                    event.set()
+                # Recursive call with use_worker=False to use main thread
+                return self._load_and_cache_chunk(file_path, chunk_idx, use_worker=False)
+
+        # --- Fallback: Data reading in main thread (outside the main lock) ---
         try:
             # Load all channels in prefetch (active channel filtering happens in get_signal_segment)
             # We load all channels here because prefetch happens asynchronously and we don't know which
@@ -125,7 +336,7 @@ class FileManager:
                     if (current_chunks and 0 <= chunk_idx < len(current_chunks) and 
                         current_chunks[chunk_idx] == chunk_info):
                         cache.put(chunk_idx, data)
-                        logger.debug(f"Cache PREFETCHED: chunk {chunk_idx} for {file_path}")
+                        logger.debug(f"Cache PREFETCHED (main thread): chunk {chunk_idx} for {file_path}")
                     else:
                         logger.debug(f"Skipping cache put for chunk {chunk_idx} - segment config changed during prefetch")
         except Exception as e:
@@ -328,9 +539,21 @@ class FileManager:
 
     # --- NEW: Method to gracefully shut down the thread pool ---
     def shutdown(self):
-        """Shuts down the background prefetch thread pool executor."""
-        logger.info("Shutting down prefetch executor...")
+        """Shuts down the background prefetch thread pool executor and worker processes."""
+        logger.info("Shutting down FileManager...")
+        
+        # Stop coordinator thread
+        if self._coordinator_thread:
+            self._coordinator_running = False
+            self._coordinator_thread.join(timeout=2)
+        
+        # Stop worker pool
+        if self._worker_pool:
+            self._worker_pool.stop()
+            
+        # Shutdown thread pool
         self._prefetch_executor.shutdown(wait=False)
+        logger.info("FileManager shutdown complete")
 
     # ... (rest of the FileManager methods: _get_file_info_unsafe, close_file, etc. remain the same) ...
     # Make sure to also add a shutdown method.
@@ -386,6 +609,11 @@ class FileManager:
                     # Clean up in-progress events for this file
                     self._in_progress.pop(file_path, None)
                     logger.info(f"Closed and removed file: {file_path}")
+                
+                # Notify worker processes to close their readers for this file
+                if self._worker_pool:
+                    self._worker_pool.close_file(file_path)
+                    
                 return gRPCMef3Server_pb2.FileInfoResponse(
                     file_path=file_path,
                     file_opened=False,
