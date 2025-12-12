@@ -110,9 +110,10 @@ class FileManager:
         try:
             # OPTIMIZATION: Serialize I/O operations to eliminate disk contention
             with self._io_lock:
-                # OPTIMIZATION: Only load all channels (active channel filtering happens in get_signal_segment)
-                # We load all channels here because prefetch happens before we know which chunk will be requested
-                # and the active channels for the request
+                # OPTIMIZATION: Load all channels in prefetch (active channel filtering happens in get_signal_segment)
+                # We load all channels here because prefetch happens asynchronously and we don't know which
+                # channels will be active when the chunk is requested. This trades memory for flexibility,
+                # allowing the cache to serve requests with different active channel configurations.
                 channels = rdr.channels
                 data = rdr.get_data(channels, chunk_info['start'], chunk_info['end'])
                 data = np.array(data)
@@ -229,7 +230,8 @@ class FileManager:
             # Only prefetch if this looks like sequential forward access
             # This reduces unnecessary prefetching and I/O contention
             last_chunk_idx = self._last_chunk.get(file_path, -1)
-            is_sequential_forward = (chunk_idx == last_chunk_idx + 1) or (last_chunk_idx == -1)
+            # Sequential access: first chunk (0), or the next chunk after the previous one
+            is_sequential_forward = (chunk_idx == 0 or chunk_idx == last_chunk_idx + 1)
             self._last_chunk[file_path] = chunk_idx
             
             if is_sequential_forward:

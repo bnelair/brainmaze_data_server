@@ -201,7 +201,8 @@ def shared_test_server():
     Uses threading instead of multiprocessing to avoid fork issues.
     """
     # Create server with default settings
-    port = 50051
+    # Use port 50052 to avoid conflict with launch_server_process (port 50051)
+    port = 50052
     server = create_grpc_server(n_prefetch=3, cache_capacity_multiplier=3, max_workers=4)
     server.add_insecure_port(f"localhost:{port}")
     
