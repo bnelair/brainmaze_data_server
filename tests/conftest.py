@@ -133,8 +133,8 @@ def launch_server_process():
     proc = multiprocessing.Process(target=server_entrypoint, daemon=True)
     proc.start()
 
-    # Wait for the server to bind the port
-    time.sleep(2)
+    # Wait for the server to bind the port and be ready
+    time.sleep(3)
 
     yield
 
@@ -142,7 +142,7 @@ def launch_server_process():
     proc.terminate()
     proc.join(timeout=5)
     # Give a bit more time for the port to be released
-    time.sleep(0.5)
+    time.sleep(1.0)
 
 
 # --- Server and Client Fixtures ---------------------------------------
@@ -192,3 +192,52 @@ def grpc_server_factory():
     # Add a small delay to ensure ports are released
     if servers:
         time.sleep(0.2)
+
+
+@pytest.fixture(scope="function")
+def shared_test_server():
+    """
+    Creates a shared gRPC server for testing with multiple stubs.
+    Uses threading instead of multiprocessing to avoid fork issues.
+    """
+    # Create server with default settings
+    port = 50051
+    server = create_grpc_server(n_prefetch=3, cache_capacity_multiplier=3, max_workers=4)
+    server.add_insecure_port(f"localhost:{port}")
+    
+    # Start server in a thread
+    server_thread = threading.Thread(target=server.start, daemon=True)
+    server_thread.start()
+    time.sleep(0.5)  # Wait for server to start
+    
+    yield port
+    
+    # Stop server
+    server.stop(0)
+    time.sleep(0.2)
+
+
+@pytest.fixture(scope="function")
+def grpc_stub_1(shared_test_server):
+    """
+    First gRPC client stub for concurrent testing.
+    Connects to the shared test server.
+    """
+    port = shared_test_server
+    channel = grpc.insecure_channel(f'localhost:{port}')
+    stub = pb2_grpc.gRPCMef3ServerStub(channel)
+    yield stub
+    channel.close()
+
+
+@pytest.fixture(scope="function")
+def grpc_stub_2(shared_test_server):
+    """
+    Second gRPC client stub for concurrent testing.
+    Connects to the shared test server.
+    """
+    port = shared_test_server
+    channel = grpc.insecure_channel(f'localhost:{port}')
+    stub = pb2_grpc.gRPCMef3ServerStub(channel)
+    yield stub
+    channel.close()
